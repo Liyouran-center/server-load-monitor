@@ -182,12 +182,17 @@ sudo ntfy access alertbot server-load-alert write-only
 
 权限可选值:`read-write`、`read-only`、`write-only`、`deny`。
 
-> 也可以在 `server.yml` 中直接预置令牌,格式为 `<用户名>:<令牌>:<备注>`,且令牌必须以 `tk_` 开头、共 32 个字符。用户需已存在于 `auth-file` 中:
+> 也可以完全在 `server.yml` 中预置用户和令牌(服务启动时自动创建,无需执行 CLI)。用户必须先在 `auth-users` 中定义,`auth-tokens` 格式为 `<用户名>:<令牌>[:<备注>]`,令牌必须以 `tk_` 开头、共 32 个字符:
 >
 > ```yaml
+> auth-file: "/var/lib/ntfy/user.db"
+> auth-users:
+>   - "alertbot:<bcrypt 密码哈希>:user"
 > auth-tokens:
 >   - "alertbot:tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx:load-monitor"
 > ```
+>
+> 修改 `server.yml` 后需重启 ntfy 服务才会生效。
 
 ### 4. 客户端:把令牌填入本项目
 

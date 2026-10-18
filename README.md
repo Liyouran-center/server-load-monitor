@@ -137,6 +137,98 @@ sudo nano /etc/load_monitor.conf
 配置项与参数一一对应:`NTFY_URL`、`NTFY_TOPIC`、`NTFY_API_KEY`、`LOAD_PER_CORE_THRESHOLD`、
 `CPU_PERCENT_THRESHOLD`、`MEM_PERCENT_THRESHOLD`、`BASE_DIR`、`HISTORY_DAYS`、`TOP_N`。
 
+## ntfy 鉴权配置(auth-token)
+
+如果你的 ntfy 服务器开启了鉴权(或使用 `ntfy.sh` 上受保护的主题),需要先在 ntfy 服务器上创建用户和令牌,再把令牌填入本项目。
+
+### 1. 服务端:启用鉴权
+
+在 ntfy 服务器的 `server.yml` 中配置用户数据库路径(设置后即启用鉴权):
+
+```yaml
+auth-file: "/var/lib/ntfy/user.db"
+auth-default-access: "deny-all"   # 默认拒绝匿名访问,推荐用于私有实例
+```
+
+修改后重启 ntfy 服务。
+
+### 2. 服务端:创建用户和令牌
+
+```bash
+# 创建一个专用于告警推送的用户
+sudo ntfy user add alertbot
+
+# 创建令牌(永不过期)
+sudo ntfy token add --expires=never alertbot
+# 输出形如: token tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx created for user alertbot
+```
+
+常用令牌管理命令:
+
+```bash
+sudo ntfy token list                 # 列出所有令牌
+sudo ntfy token list alertbot        # 列出某个用户的令牌
+sudo ntfy token remove alertbot tk_xxxx   # 吊销某个令牌
+sudo ntfy token add --expires=30d --label="load-monitor" alertbot   # 带有效期和备注
+```
+
+### 3. 服务端:授予主题权限
+
+令牌必须对应一个有权限的用户。推荐只授予**写**权限,这样即使监控服务器上的令牌泄露,攻击者也无法读取其他告警:
+
+```bash
+sudo ntfy access alertbot server-load-alert write-only
+```
+
+权限可选值:`read-write`、`read-only`、`write-only`、`deny`。
+
+> 也可以在 `server.yml` 中直接预置令牌,格式为 `<用户名>:<令牌>:<备注>`,且令牌必须以 `tk_` 开头、共 32 个字符。用户需已存在于 `auth-file` 中:
+>
+> ```yaml
+> auth-tokens:
+>   - "alertbot:tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx:load-monitor"
+> ```
+
+### 4. 客户端:把令牌填入本项目
+
+令牌通过 HTTP 头 `Authorization: Bearer <令牌>` 发送。本项目读取 `NTFY_API_KEY` 作为令牌,有两种配置方式:
+
+**方式 A:安装时传入(安装后会写入 `/etc/load_monitor.conf`)**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Liyouran-center/server-load-monitor/main/install.sh \
+  | sudo env NTFY_URL=https://ntfy.example.com NTFY_TOPIC=server-load-alert NTFY_API_KEY=tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx bash
+```
+
+**方式 B:安装后直接编辑配置文件**
+
+```bash
+sudo nano /etc/load_monitor.conf
+# 修改为:
+# NTFY_API_KEY="tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
+修改后无需重启 cron,下一次执行即生效。配置文件权限为 `0600`,只有 root 可读。
+
+### 5. 验证
+
+```bash
+sudo /opt/load-monitor/load_monitor.sh test
+```
+
+返回 `HTTP 200` 即表示令牌、地址和主题权限均正确。如果返回 `401` 或 `403`,按下面的排查清单逐项检查。
+
+### 鉴权失败排查清单
+
+| 现象 | 检查项 |
+|---|---|
+| `401` 未授权 | 令牌是否为空或拼写错误;令牌是否已被 `token remove` 吊销 |
+| `403` 禁止访问 | 用户是否对该主题有 `write-only` 或 `read-write` 权限(`sudo ntfy access alertbot server-load-alert write-only`) |
+| 令牌已过期 | `sudo ntfy token list alertbot` 查看有效期,重新创建令牌 |
+| 测试仍失败 | `grep NTFY_API_KEY /etc/load_monitor.conf` 确认配置已更新,注意 `tk_` 前缀完整 |
+
+> **注意**:令牌等同于账户访问权限(除修改密码和删除账户外)。请勿把令牌提交到 Git 仓库或在聊天中公开分享。直接在命令行传入令牌会留在 shell 历史中,安装后可用方式 B 改为编辑配置文件,并清理历史记录。
+
 ## 告警判定规则
 
 每分钟的一次采集,只要满足以下任一条件即记为 `OVERLOAD`:

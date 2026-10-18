@@ -84,7 +84,27 @@ tail -n 1 /var/log/load_monitor/load_*.log
 
 # 手动触发一次打包(会按需推送告警)
 sudo /opt/load-monitor/load_monitor.sh pack
+
+# 发送一条测试通知,验证 ntfy 配置是否正确
+sudo /opt/load-monitor/load_monitor.sh test
 ```
+
+### 通知测试
+
+`test` 命令会向配置的 ntfy 主题发送一条测试消息,并打印 HTTP 状态码:
+
+```bash
+sudo /opt/load-monitor/load_monitor.sh test
+```
+
+| 结果 | 含义 | 处理建议 |
+|---|---|---|
+| `HTTP 200` | 发送成功 | 去 ntfy 客户端确认是否收到消息 |
+| `000` | 无法连接服务器 | 检查 `NTFY_URL`、网络和防火墙 |
+| `401` / `403` | 鉴权失败 | 检查 `NTFY_API_KEY` 及主题的读写权限 |
+| `404` | 地址或主题不存在 | 检查 `NTFY_URL` 与 `NTFY_TOPIC` |
+
+测试命令成功返回 `0`,失败返回 `1`,可用于脚本或监控集成。它只发送一条消息,不会修改日志或归档。
 
 ## 参数说明
 

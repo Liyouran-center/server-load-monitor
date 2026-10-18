@@ -5,6 +5,7 @@
 # 用法:
 #   load_monitor.sh record   # 每分钟记录一次(由 crontab 调用)
 #   load_monitor.sh pack     # 每小时打包一次并视情况推送 ntfy
+#   load_monitor.sh test     # 发送一条测试通知,验证 ntfy 配置是否正确
 #
 # 通常由 install.sh 安装到 /opt/load-monitor 并自动配置 crontab;
 # 安装时生成的 /etc/load_monitor.conf 会覆盖下方的默认值。
@@ -119,8 +120,45 @@ do_pack() {
     find "${BASE_DIR}" -maxdepth 1 -type f -name 'load_*.log' -mtime +1 -delete
 }
 
+# ---------- 通知测试 ----------
+# 发送一条测试消息到 ntfy,并打印 HTTP 状态码,用于验证服务器地址、主题和令牌是否正确。
+# 成功返回 0,失败返回 1。不修改任何日志或归档。
+do_test() {
+    local ts http_code auth_args=()
+    ts=$(date '+%F %T')
+    echo "==> 发送测试通知"
+    echo "    服务器: ${NTFY_URL}"
+    echo "    主题:   ${NTFY_TOPIC}"
+    if [ -n "$NTFY_API_KEY" ]; then
+        auth_args=(-H "Authorization: Bearer ${NTFY_API_KEY}")
+        echo "    鉴权:   已配置 API Key"
+    else
+        echo "    鉴权:   未配置 API Key(若服务器要求鉴权将失败)"
+    fi
+
+    http_code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' "${auth_args[@]}" \
+        -H "Title: load-monitor test on $(hostname)" \
+        -H "Priority: default" -H "Tags: white_check_mark" \
+        -d "这是一条测试通知 (${ts}),如果你看到这条消息,说明通知配置正常。" \
+        "${NTFY_URL}/${NTFY_TOPIC}") || http_code="000"
+
+    if [ "$http_code" = "200" ]; then
+        echo "==> 成功: 服务器返回 HTTP 200,请检查客户端是否收到消息"
+        return 0
+    fi
+    echo "==> 失败: HTTP 状态码 ${http_code}" >&2
+    case "$http_code" in
+        000) echo "    无法连接服务器,请检查 NTFY_URL、网络或防火墙" >&2 ;;
+        401|403) echo "    鉴权失败,请检查 NTFY_API_KEY 及主题权限" >&2 ;;
+        404) echo "    地址或主题不存在,请检查 NTFY_URL 与 NTFY_TOPIC" >&2 ;;
+        *) echo "    服务器返回异常,请查看 ntfy 服务日志" >&2 ;;
+    esac
+    return 1
+}
+
 case "${1:-}" in
     record) do_record ;;
     pack)   do_pack ;;
-    *)      echo "usage: $0 {record|pack}" >&2; exit 1 ;;
+    test)   do_test ;;
+    *)      echo "usage: $0 {record|pack|test}" >&2; exit 1 ;;
 esac

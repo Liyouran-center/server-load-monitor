@@ -1,0 +1,28 @@
+# linux-health-monitor 配置文件示例
+#
+# 安装后位于（按优先级）:
+#   $LHM_CONFIG 环境变量指定的文件
+#   /etc/linux-health-monitor.conf            （root 安装时生成）
+#   ~/.config/linux-health-monitor.conf       （普通用户安装时生成）
+#
+# 注意：本文件会被 monitor.sh 以 shell 语法 source，只写 KEY=VALUE，不要写入命令。
+# 修改后下一次 cron 执行即生效，无需重启任何服务。
+
+# ---------- 告警阈值 ----------
+# 指标严格大于阈值时输出 ALERT，并且 monitor.sh 返回退出码 1。
+CPU_WARN=90              # CPU 使用率 %
+MEM_WARN=90              # 内存真实使用率 %（已排除缓存与缓冲区）
+SWAP_WARN=80             # Swap 使用率 %
+LOAD_RATIO_WARN=1.0      # 1 分钟平均负载 / CPU 核心数
+DISK_WARN=85             # 磁盘空间使用率 %
+INODE_WARN=85            # 磁盘 inode 使用率 %
+ZOMBIE_WARN=10           # 僵尸进程数量
+
+# ---------- 磁盘检查 ----------
+# 需要检查的挂载点，空格分隔。根分区 / 建议始终保留。
+# 例如: DISK_MOUNTS="/ /data /var"
+DISK_MOUNTS="/"
+
+# ---------- 采样 ----------
+# CPU 使用率两次采样之间的间隔（秒）
+CPU_SAMPLE_SECONDS=1

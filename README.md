@@ -1,320 +1,199 @@
-# server-load-monitor
+# linux-health-monitor
 
-每分钟采集服务器负载(loadavg / CPU / 内存),每小时打包归档;一旦某小时内出现负载过高,
-自动附加 CPU Top N 进程快照,并通过 [ntfy](https://ntfy.sh) 推送告警(支持 API Key 鉴权,可自建服务器)。
+轻量级 Linux 服务器健康检查脚本。纯 Bash 实现，只依赖 Linux 标准工具，由 cron 定时执行，
+支持一行命令安装，不依赖任何第三方付费组件。
 
-纯 Bash 实现,无第三方依赖,由 cron 驱动。
+## 监控指标
 
-## 功能概览
+| 指标 | 说明 | 默认阈值 |
+|---|---|---|
+| 负载 | 1 / 5 / 15 分钟平均负载（来自 `/proc/loadavg`） | — |
+| 负载/核心比 | 1 分钟负载 ÷ CPU 核心数 | 1.0 |
+| CPU 使用率 | `/proc/stat` 两次采样计算；失败时回退到 `top -bn1` | 90% |
+| 内存真实使用率 | `free -m` 计算，排除缓存与缓冲区（总量 − available） | 90% |
+| Swap 使用率 | `free -m` 计算；未配置 Swap 记为 0% | 80% |
+| 磁盘使用率 | `df -P`，默认只检查 `/`，可通过 `DISK_MOUNTS` 追加挂载点 | 85% |
+| 磁盘 inode 使用率 | `df -iP`，与磁盘挂载点一一对应 | 85% |
+| 开机时长与启动时间 | `/proc/uptime` 与系统时间换算 | — |
+| 进程总数与僵尸进程数 | `ps` 统计 | 僵尸 10 个 |
 
-- **每分钟采集**:1/5/15 分钟平均负载、CPU 使用率、内存使用率,写入按小时切分的日志。
-- **过高时快照**:任一指标超过阈值,立即追加 `ps` 抓取的 CPU Top N 进程,并打上 `OVERLOAD` 标记。
-- **每小时打包**:将上一小时日志压缩为 `.gz` 归档,自动清理过期归档。
-- **按需告警**:仅当上一小时出现过 `OVERLOAD` 才推送;正常小时只归档、不打扰。
+任一指标**严格超过**阈值即输出 `ALERT`，脚本返回退出码 `1`。
+某项指标无法采集时显示为 `n/a`，不会导致脚本退出，也不会触发告警。
 
-## 环境要求
+## 系统要求
 
-- Linux,具备 `sudo`(root) 权限
-- GNU coreutils(需要 `date -d`、`nproc`)
-- `cron` / `crontab`
-- `curl`、`gzip`、`gawk`(或 `awk`)
-- `procps`(提供 `ps`、`top`)
+- Linux（需要 `/proc` 文件系统）
+- Bash 3.2 或更高版本（兼容 macOS 默认版本的语法，但仅在 Linux 上运行）
+- GNU coreutils（`date -d`、`nproc`）、`procps`（`free`、`ps`、`top`）
+- `curl`、`tar`、`crontab`（仅安装脚本需要）
 
-Debian / Ubuntu 可一次性安装:
+Debian / Ubuntu：
 
 ```bash
-sudo apt install -y cron curl procps gawk gzip coreutils
+sudo apt install -y cron curl tar procps coreutils
 ```
 
-CentOS / RHEL 系:
+CentOS / RHEL：
 
 ```bash
-sudo yum install -y cronie curl procps-ng gawk gzip coreutils
+sudo yum install -y cronie curl tar procps-ng coreutils
 ```
 
 ## 一行安装
 
-不带告警推送(只采集、归档):
+> 请先阅读 [SECURITY.md](SECURITY.md)。对于生产服务器，推荐使用下面的"先下载、审查、再执行"方式。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Liyouran-center/server-load-monitor/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Liyouran-center/server-load-monitor/main/install.sh | bash
 ```
 
-带全部参数(以下为示例值,请替换为你自己的):
+默认行为：
+
+- 普通用户运行：程序安装到 `~/.local/bin/linux-health-monitor`，配置到 `~/.config/linux-health-monitor.conf`，日志写入 `~/.local/state/linux-health-monitor.log`。
+- root 运行：程序安装到 `/usr/local/bin/linux-health-monitor`，配置到 `/etc/linux-health-monitor.conf`，日志写入 `/var/log/linux-health-monitor.log`。
+- 在当前用户的 crontab 中追加一组条目（每 5 分钟执行一次）。已存在则不会重复添加。
+
+### 先下载、审查、再执行（推荐）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Liyouran-center/server-load-monitor/main/install.sh | sudo bash -s -- \
-  --ntfy-url https://ntfy.example.com \
-  --ntfy-topic server-load-alert \
-  --api-key tk_xxxxxxxxxxxxxxxx \
-  --load-threshold 1.5 \
-  --cpu-threshold 90 \
-  --mem-threshold 90 \
-  --install-dir /opt/load-monitor \
-  --log-dir /var/log/load_monitor \
-  --retention 7 \
-  --top-n 5
+curl -fsSL https://raw.githubusercontent.com/Liyouran-center/server-load-monitor/main/install.sh -o install.sh
+less install.sh
+bash install.sh --dry-run    # 查看将要执行的全部操作，不修改系统
+bash install.sh
 ```
 
-> **安全提示**:命令行参数会被记录在 shell 历史和进程列表中。如果要传入 API Key,推荐使用环境变量写法:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Liyouran-center/server-load-monitor/main/install.sh \
-  | sudo env NTFY_URL=https://ntfy.example.com NTFY_TOPIC=server-load-alert NTFY_API_KEY=tk_xxxxxxxxxxxxxxxx bash
-```
-
-> 请使用 `sudo env ...` 而不是 `sudo VAR=... bash`:后者取决于 sudoers 配置,部分系统会忽略变量。
-
-如果已经 `git clone` 了仓库,也可以在本地直接运行:
+### 手动安装（克隆仓库）
 
 ```bash
 git clone https://github.com/Liyouran-center/server-load-monitor.git
 cd server-load-monitor
-sudo ./install.sh --ntfy-url https://ntfy.example.com --api-key tk_xxxxxxxxxxxxxxxx
+bash install.sh --dry-run
+bash install.sh
 ```
 
-## 安装后验证
+## 安装选项
 
-```bash
-# 查看 cron 任务(应包含两条带 "# load-monitor" 标记的任务)
-crontab -l
-
-# 查看最新一条采集记录
-tail -n 1 /var/log/load_monitor/load_*.log
-
-# 手动触发一次打包(会按需推送告警)
-sudo /opt/load-monitor/load_monitor.sh pack
-
-# 发送一条测试通知,验证 ntfy 配置是否正确
-sudo /opt/load-monitor/load_monitor.sh test
-```
-
-### 通知测试
-
-`test` 命令会向配置的 ntfy 主题发送一条测试消息,并打印 HTTP 状态码:
-
-```bash
-sudo /opt/load-monitor/load_monitor.sh test
-```
-
-| 结果 | 含义 | 处理建议 |
-|---|---|---|
-| `HTTP 200` | 发送成功 | 去 ntfy 客户端确认是否收到消息 |
-| `000` | 无法连接服务器 | 检查 `NTFY_URL`、网络和防火墙 |
-| `401` / `403` | 鉴权失败 | 检查 `NTFY_API_KEY` 及主题的读写权限 |
-| `404` | 地址或主题不存在 | 检查 `NTFY_URL` 与 `NTFY_TOPIC` |
-
-测试命令成功返回 `0`,失败返回 `1`,可用于脚本或监控集成。它只发送一条消息,不会修改日志或归档。
-
-## 参数说明
-
-| 命令行参数 | 环境变量 | 默认值 | 说明 |
-|---|---|---|---|
-| `--ntfy-url` | `NTFY_URL` | `https://ntfy.sh` | ntfy 服务器地址 |
-| `--ntfy-topic` | `NTFY_TOPIC` | `server-load-alert` | ntfy 主题 |
-| `--api-key` | `NTFY_API_KEY` | 空 | ntfy 访问令牌;为空则不推送 |
-| `--load-threshold` | `LOAD_THRESHOLD` | `1.5` | `load1 / CPU 核数` 的阈值 |
-| `--cpu-threshold` | `CPU_THRESHOLD` | `90` | CPU 使用率(%)阈值 |
-| `--mem-threshold` | `MEM_THRESHOLD` | `90` | 内存使用率(%)阈值 |
-| `--install-dir` | `INSTALL_DIR` | `/opt/load-monitor` | 程序安装目录 |
-| `--log-dir` | `LOG_DIR` | `/var/log/load_monitor` | 日志根目录 |
-| `--retention` | `RETENTION_DAYS` | `7` | 归档保留天数 |
-| `--top-n` | `TOP_N` | `5` | 高负载时抓取的进程数 |
-| `--uninstall` | — | — | 卸载(见下文) |
-| `-h`, `--help` | — | — | 显示帮助 |
-
-优先级:**命令行参数 > 环境变量 > 默认值**。
-
-## 配置文件
-
-安装时会生成 `/etc/load_monitor.conf`(权限 `0600`,因为其中含有 API Key)。
-修改后无需重启 cron,下一次执行 `record` / `pack` 即生效:
-
-```bash
-sudo nano /etc/load_monitor.conf
-```
-
-配置项与参数一一对应:`NTFY_URL`、`NTFY_TOPIC`、`NTFY_API_KEY`、`LOAD_PER_CORE_THRESHOLD`、
-`CPU_PERCENT_THRESHOLD`、`MEM_PERCENT_THRESHOLD`、`BASE_DIR`、`HISTORY_DAYS`、`TOP_N`。
-
-## ntfy 鉴权配置(auth-token)
-
-如果你的 ntfy 服务器开启了鉴权(或使用 `ntfy.sh` 上受保护的主题),需要先在 ntfy 服务器上创建用户和令牌,再把令牌填入本项目。
-
-### 1. 服务端:启用鉴权
-
-在 ntfy 服务器的 `server.yml` 中配置用户数据库路径(设置后即启用鉴权):
-
-```yaml
-auth-file: "/var/lib/ntfy/user.db"
-auth-default-access: "deny-all"   # 默认拒绝匿名访问,推荐用于私有实例
-```
-
-修改后重启 ntfy 服务。
-
-### 2. 服务端:创建用户和令牌
-
-```bash
-# 创建一个专用于告警推送的用户
-sudo ntfy user add alertbot
-
-# 创建令牌(永不过期)
-sudo ntfy token add --expires=never alertbot
-# 输出形如: token tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx created for user alertbot
-```
-
-常用令牌管理命令:
-
-```bash
-sudo ntfy token list                 # 列出所有令牌
-sudo ntfy token list alertbot        # 列出某个用户的令牌
-sudo ntfy token remove alertbot tk_xxxx   # 吊销某个令牌
-sudo ntfy token add --expires=30d --label="load-monitor" alertbot   # 带有效期和备注
-```
-
-### 3. 服务端:授予主题权限
-
-令牌必须对应一个有权限的用户。推荐只授予**写**权限,这样即使监控服务器上的令牌泄露,攻击者也无法读取其他告警:
-
-```bash
-sudo ntfy access alertbot server-load-alert write-only
-```
-
-权限可选值:`read-write`、`read-only`、`write-only`、`deny`。
-
-> 也可以完全在 `server.yml` 中预置用户和令牌(服务启动时自动创建,无需执行 CLI)。用户必须先在 `auth-users` 中定义,`auth-tokens` 格式为 `<用户名>:<令牌>[:<备注>]`,令牌必须以 `tk_` 开头、共 32 个字符:
->
-> ```yaml
-> auth-file: "/var/lib/ntfy/user.db"
-> auth-users:
->   - "alertbot:<bcrypt 密码哈希>:user"
-> auth-tokens:
->   - "alertbot:tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx:load-monitor"
-> ```
->
-> 修改 `server.yml` 后需重启 ntfy 服务才会生效。
-
-### 4. 客户端:把令牌填入本项目
-
-令牌通过 HTTP 头 `Authorization: Bearer <令牌>` 发送。本项目读取 `NTFY_API_KEY` 作为令牌,有两种配置方式:
-
-**方式 A:安装时传入(安装后会写入 `/etc/load_monitor.conf`)**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Liyouran-center/server-load-monitor/main/install.sh \
-  | sudo env NTFY_URL=https://ntfy.example.com NTFY_TOPIC=server-load-alert NTFY_API_KEY=tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx bash
-```
-
-**方式 B:安装后直接编辑配置文件**
-
-```bash
-sudo nano /etc/load_monitor.conf
-# 修改为:
-# NTFY_API_KEY="tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-```
-
-修改后无需重启 cron,下一次执行即生效。配置文件权限为 `0600`,只有 root 可读。
-
-### 5. 验证
-
-```bash
-sudo /opt/load-monitor/load_monitor.sh test
-```
-
-返回 `HTTP 200` 即表示令牌、地址和主题权限均正确。如果返回 `401` 或 `403`,按下面的排查清单逐项检查。
-
-### 鉴权失败排查清单
-
-| 现象 | 检查项 |
+| 选项 | 说明 |
 |---|---|
-| `401` 未授权 | 令牌是否为空或拼写错误;令牌是否已被 `token remove` 吊销 |
-| `403` 禁止访问 | 用户是否对该主题有 `write-only` 或 `read-write` 权限(`sudo ntfy access alertbot server-load-alert write-only`) |
-| 令牌已过期 | `sudo ntfy token list alertbot` 查看有效期,重新创建令牌 |
-| 测试仍失败 | `grep NTFY_API_KEY /etc/load_monitor.conf` 确认配置已更新,注意 `tk_` 前缀完整 |
+| `--dry-run` | 只打印将要执行的操作，不下载、不修改任何文件或 crontab |
+| `--uninstall` | 卸载（等同于运行 `uninstall.sh`） |
+| `--prefix DIR` | 程序安装目录 |
+| `--interval N` | cron 执行间隔（分钟，1–59，默认 5） |
+| `--ref REF` | 下载的分支名或 commit SHA（默认 `main`） |
+| `-h, --help` | 显示帮助 |
 
-> **注意**:令牌等同于账户访问权限(除修改密码和删除账户外)。请勿把令牌提交到 Git 仓库或在聊天中公开分享。直接在命令行传入令牌会留在 shell 历史中,安装后可用方式 B 改为编辑配置文件,并清理历史记录。
+示例：每 1 分钟执行一次，并安装到自定义目录：
 
-## 告警判定规则
+```bash
+bash install.sh --interval 1 --prefix /opt/bin
+```
 
-每分钟的一次采集,只要满足以下任一条件即记为 `OVERLOAD`:
+安装脚本只会访问 `codeload.github.com` 下载仓库源码，不执行其他网络请求。
 
-- `load1 / 核数 > LOAD_PER_CORE_THRESHOLD`
-- `CPU 使用率 > CPU_PERCENT_THRESHOLD`
-- `内存使用率 > MEM_PERCENT_THRESHOLD`
+## 使用
 
-每小时整点 `pack` 运行时,检查**上一小时**的日志:
+```bash
+linux-health-monitor            # 纯文本输出（普通用户时请使用完整路径 ~/.local/bin/linux-health-monitor）
+linux-health-monitor --json     # 单行 JSON，便于日志系统或脚本解析
+linux-health-monitor --help
+```
 
-- 没有任何 `OVERLOAD`:仅压缩归档,**不推送**。
-- 存在 `OVERLOAD`:推送一条高优先级告警,内容包括出现次数、负载峰值、最近一次的进程快照,以及归档文件名。
+纯文本输出示例：
 
-## 工作原理
+```text
+=== linux-health-monitor | 2026-10-25 10:00:00 | web-01 | 配置: /etc/linux-health-monitor.conf ===
+  指标                 当前值          阈值       状态
+  load_1m                0.52               -            OK
+  load_ratio             0.13            阈值 1.0   OK
+  cpu_pct                12.3            阈值 90    OK
+  mem_pct                61.0            阈值 90    OK
+  disk:/                 45              阈值 85    OK
+  zombies                0               阈值 10    OK
+STATUS: OK
+```
 
-| 任务 | 频率 | 动作 |
+退出码：
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 所有指标正常 |
+| `1` | 至少一项指标超过阈值（输出包含 `ALERT`） |
+| `2` | 环境不支持（非 Linux）或参数错误 |
+
+## 配置
+
+安装时会根据 [config.example](config.example) 生成配置文件。脚本按以下顺序查找配置：
+
+1. 环境变量 `LHM_CONFIG` 指定的文件
+2. `/etc/linux-health-monitor.conf`
+3. `~/.config/linux-health-monitor.conf`
+
+修改后无需重启，下一次 cron 执行即生效。
+
+| 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `load_monitor.sh record` | 每分钟 | 采集指标写入 `load_YYYYMMDD_HH.log`;超阈值时追加 `ps` Top N 快照并打 `OVERLOAD` 标记 |
-| `load_monitor.sh pack` | 每小时整点 | 检查上一小时日志 → 按需推送 ntfy → 压缩为 `archive/YYYYMMDD/*.gz` → 清理过期文件 |
+| `CPU_WARN` | 90 | CPU 使用率告警阈值（%） |
+| `MEM_WARN` | 90 | 内存真实使用率告警阈值（%） |
+| `SWAP_WARN` | 80 | Swap 使用率告警阈值（%） |
+| `LOAD_RATIO_WARN` | 1.0 | 负载/核心比告警阈值 |
+| `DISK_WARN` | 85 | 磁盘使用率告警阈值（%） |
+| `INODE_WARN` | 85 | inode 使用率告警阈值（%） |
+| `ZOMBIE_WARN` | 10 | 僵尸进程数告警阈值 |
+| `DISK_MOUNTS` | `/` | 需检查的挂载点，空格分隔，例如 `"/ /data /var"` |
+| `CPU_SAMPLE_SECONDS` | 1 | CPU 使用率两次采样间隔（秒） |
 
-日志文件示例(一行采集记录 + 一段过高快照):
+## cron 与日志
 
-```text
-[2026-10-18 10:03:00] load1=0.52 load5=0.48 load15=0.40 cores=4 cpu%=12.3 mem%=45.6
-[2026-10-18 10:07:00] load1=6.10 load5=3.20 load15=1.90 cores=4 cpu%=97.5 mem%=52.1
-[2026-10-18 10:07:00] === OVERLOAD: top 5 processes by CPU ===
-  PID  PPID USER      %CPU %MEM     ELAPSED COMMAND
- 1234  1100 www-data  85.2  4.1    02:13:45 php-fpm
- ...
+安装后 crontab 中会出现两行（`crontab -l` 可查看）：
+
+```cron
+# linux-health-monitor
+*/5 * * * * /usr/local/bin/linux-health-monitor >> /var/log/linux-health-monitor.log 2>&1
 ```
 
-目录结构:
+脚本的退出码会被 cron 忽略，因此请通过日志中的 `STATUS:` 行或 `--json` 输出的 `"status"` 字段判断健康状态。
+日志不会自动轮转，长期运行时请配置 `logrotate`。
 
-```text
-/opt/load-monitor/
-└── load_monitor.sh                 # 主程序
-/etc/load_monitor.conf              # 配置文件(含 API Key,0600)
-/var/log/load_monitor/
-├── load_20261018_10.log            # 当前小时的原始日志
-├── archive/
-│   └── 20261017/
-│       └── load_20261017_09.log.gz # 已打包的历史归档
-└── cron.log                        # cron 执行输出(用于排错)
+## 验证
+
+```bash
+crontab -l                                        # 应能看到上面的两行
+/usr/local/bin/linux-health-monitor; echo "exit=$?"   # 立即运行一次
+tail -n 20 /var/log/linux-health-monitor.log      # 查看 cron 写入的日志
 ```
+
+普通用户安装时，把路径替换为 `~/.local/bin/linux-health-monitor` 和 `~/.local/state/linux-health-monitor.log`。
 
 ## 卸载
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Liyouran-center/server-load-monitor/main/install.sh | sudo bash -s -- --uninstall
+bash uninstall.sh                 # 移除 cron 条目与程序，保留配置和日志
+bash uninstall.sh --purge         # 同时删除配置文件与日志
 ```
 
-卸载会移除 cron 任务、`/etc/load_monitor.conf` 以及程序目录。**日志目录会保留**,如需删除请手动执行:
+或者在安装脚本上使用 `--uninstall`：
 
 ```bash
-sudo rm -rf /var/log/load_monitor
+curl -fsSL https://raw.githubusercontent.com/Liyouran-center/server-load-monitor/main/install.sh | bash -s -- --uninstall
 ```
 
-> 如果安装时使用了自定义的 `--install-dir`,卸载时需要传入相同的参数,例如 `--install-dir /opt/my-monitor --uninstall`。
+卸载只删除程序文件，不会删除 `~/.local/bin` 等目录本身。
 
-## 故障排查
+## 仓库文件说明
 
-- **没有收到告警**
-  1. 确认安装时已提供 `--api-key`:`grep NTFY_API_KEY /etc/load_monitor.conf`(注意权限,需 root)。
-  2. 手动触发:`sudo /opt/load-monitor/load_monitor.sh pack`,观察是否有 curl 报错。
-  3. 检查 ntfy 服务器地址、主题名和令牌权限是否正确。
-  4. 确认上一小时确实出现过 `OVERLOAD`:`grep -c OVERLOAD /var/log/load_monitor/load_*.log`。
-- **没有日志生成**:`crontab -l` 检查任务是否存在;查看 `/var/log/load_monitor/cron.log`。
-- **`record` 报 `top` 相关错误**:安装 `procps`,并确认 `top -bn1` 输出中包含 `%Cpu` 行。
-- **阈值过于敏感或不灵敏**:调整 `LOAD_PER_CORE_THRESHOLD` 等值。负载阈值是相对于核数的,4 核机器上 `1.5` 即意味着 1 分钟平均负载达到 6。
-
-## 注意事项
-
-- `cron.log` 会随时间持续增长,不会被自动轮转。长期运行时可自行配置 `logrotate`。
-- 归档保留天数由 `HISTORY_DAYS` 控制,单位为天,按文件修改时间清理。
-- CPU 使用率来自 `top -bn1` 的一次快照,短时尖峰可能被平均掉;需要更精细的数据可调整采集频率。
-- 通过 `curl | bash` 运行时,安装脚本会自动从本仓库下载 `load_monitor.sh`;如需使用 fork 或其他分支,可设置环境变量 `REPO_RAW` 指向对应的 raw 地址。
-
-## 文件说明
-
-| 文件 | 说明 |
+| 文件 | 作用 |
 |---|---|
-| `install.sh` | 一键安装 / 卸载脚本,负责写入配置、安装 cron 任务 |
-| `load_monitor.sh` | 采集、判断、打包、推送的主程序 |
-| `README.md` | 本文档 |
+| `monitor.sh` | 主监控脚本：采集指标、判断阈值、输出文本或 JSON，并以退出码反映健康状态 |
+| `install.sh` | 安装脚本：通过 HTTPS 下载仓库源码，安装程序与配置，并添加 cron 条目；支持 `--dry-run` |
+| `uninstall.sh` | 卸载脚本：移除 cron 条目与程序文件；`--purge` 时同时删除配置与日志 |
+| `config.example` | 阈值与挂载点配置示例，安装时复制为正式配置文件 |
+| `README.md` | 本文档：安装、使用、配置说明 |
+| `SECURITY.md` | 安全说明：`curl \| bash` 的风险与缓解措施 |
+
+## 常见问题
+
+- **`ALERT` 一直出现**：先看 `linux-health-monitor` 的输出确认是哪一项，再根据服务器实际情况调整配置文件中的阈值。
+- **某项显示 `n/a`**：该指标在当前系统上无法采集，例如挂载点不存在、`free` 不可用。脚本会继续运行。
+- **cron 没有输出**：检查 `crontab -l`，并确认 cron 服务已启动（`systemctl status cron` 或 `crond`）。
+- **安装时报 `crontab` 未找到**：请先安装 cron（见上文系统要求）。
+- **想修改 cron 间隔**：先 `uninstall.sh`，再用 `--interval` 重新安装。

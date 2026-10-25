@@ -23,6 +23,8 @@ PREFIX=""
 BIN_PATH=""
 CONFIG_PATH=""
 LOG_FILE=""
+LIB_DIR=""
+STATE_DIR=""
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
@@ -57,13 +59,35 @@ resolve_paths() {
         [ -n "$PREFIX" ] || PREFIX=/usr/local/bin
         CONFIG_PATH=/etc/linux-health-monitor.conf
         LOG_FILE=/var/log/linux-health-monitor.log
+        STATE_DIR=/var/lib/linux-health-monitor
     else
         : "${HOME:?HOME 未设置，请用 --prefix 指定程序目录}"
         [ -n "$PREFIX" ] || PREFIX="$HOME/.local/bin"
         CONFIG_PATH="$HOME/.config/linux-health-monitor.conf"
         LOG_FILE="$HOME/.local/state/linux-health-monitor.log"
+        STATE_DIR="$HOME/.local/state/linux-health-monitor"
     fi
     BIN_PATH="$PREFIX/$PROG_NAME"
+    LIB_DIR="$(dirname -- "$PREFIX")/lib/$PROG_NAME"
+}
+
+# remove_dir 目录 说明：只删除本项目自己的目录（目录名必须是 linux-health-monitor）
+remove_dir() {
+    local d="$1" label="$2"
+    if [ "$(basename -- "$d")" != "$PROG_NAME" ]; then
+        warn "拒绝删除非本项目目录: $d"
+        return 0
+    fi
+    if [ ! -d "$d" ]; then
+        say "不存在，跳过${label}: $d"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "[dry-run] 删除${label}: $d"
+        return 0
+    fi
+    rm -rf -- "$d"
+    say "已删除${label}: $d"
 }
 
 # 删除 crontab 中的标记行，以及紧随其后的本项目任务行
@@ -122,14 +146,17 @@ main() {
     say "=== linux-health-monitor 卸载 ==="
     remove_cron
     remove_path "$BIN_PATH" "程序"
+    remove_dir "$LIB_DIR" "通知模块目录"
 
     if [ "$PURGE" -eq 1 ]; then
         remove_path "$CONFIG_PATH" "配置文件"
         remove_path "$LOG_FILE" "日志文件"
+        remove_dir "$STATE_DIR" "状态目录"
     else
-        say "保留配置文件与日志（如需一并删除，请加 --purge）:"
+        say "保留配置文件、日志与通知状态（如需一并删除，请加 --purge）:"
         say "  $CONFIG_PATH"
         say "  $LOG_FILE"
+        say "  $STATE_DIR"
     fi
 
     if [ "$DRY_RUN" -eq 1 ]; then

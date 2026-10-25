@@ -37,6 +37,8 @@ TMP_DIR=""
 BIN_PATH=""
 CONFIG_PATH=""
 LOG_FILE=""
+LIB_DIR=""
+NOTIFIER_DST=""
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
@@ -115,6 +117,9 @@ resolve_paths() {
         LOG_FILE="$HOME/.local/state/linux-health-monitor.log"
     fi
     BIN_PATH="$PREFIX/$PROG_NAME"
+    # 通知模块安装到 <PREFIX 的上级>/lib/linux-health-monitor/notifiers
+    LIB_DIR="$(dirname -- "$PREFIX")/lib/$PROG_NAME"
+    NOTIFIER_DST="$LIB_DIR/notifiers"
 }
 
 # cron 不能正确处理包含空白或 % 的路径
@@ -182,6 +187,24 @@ install_program() {
     say "已安装程序: $BIN_PATH"
 }
 
+# 安装通知模块（notifiers/*.sh），monitor.sh 会从这里加载
+install_notifiers() {
+    ensure_dir "$NOTIFIER_DST"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "[dry-run] 安装通知模块 notifiers/*.sh -> $NOTIFIER_DST（权限 0644）"
+        return 0
+    fi
+    local f count=0
+    for f in "$TMP_DIR/src/notifiers/"*.sh; do
+        [ -f "$f" ] || continue
+        cp -- "$f" "$NOTIFIER_DST/"
+        chmod 0644 -- "$NOTIFIER_DST/$(basename -- "$f")"
+        count=$((count + 1))
+    done
+    [ "$count" -gt 0 ] || die "仓库中缺少通知模块 notifiers/*.sh"
+    say "已安装通知模块（${count} 个）到: $NOTIFIER_DST"
+}
+
 install_config() {
     if [ -e "$CONFIG_PATH" ]; then
         say "配置文件已存在，保留不变: $CONFIG_PATH"
@@ -194,7 +217,8 @@ install_config() {
     ensure_dir "$(dirname -- "$CONFIG_PATH")"
     if [ -f "$TMP_DIR/src/config.example" ]; then
         cp -- "$TMP_DIR/src/config.example" "$CONFIG_PATH"
-        chmod 0644 -- "$CONFIG_PATH"
+        # 配置中可能保存通知令牌，只允许所有者读写
+        chmod 0600 -- "$CONFIG_PATH"
         say "已生成配置文件: $CONFIG_PATH"
     else
         warn "仓库中没有 config.example，跳过配置文件生成（将使用内置默认阈值）"
@@ -252,11 +276,17 @@ print_summary() {
     say "  配置 : $CONFIG_PATH"
     say "  cron : */${INTERVAL} * * * * ${BIN_PATH} >> ${LOG_FILE} 2>&1"
     say "  日志 : $LOG_FILE"
+    say "  模块 : $NOTIFIER_DST"
     say ""
     say "验证方法:"
     say "  crontab -l                     # 查看定时任务"
     say "  $BIN_PATH                      # 立即运行一次（退出码 0=正常 1=告警 2=环境错误）"
     say "  tail -n 20 $LOG_FILE           # 查看 cron 写入的日志"
+    say ""
+    say "启用通知（默认关闭）:"
+    say "  1. 编辑 $CONFIG_PATH"
+    say "     设置 NOTIFIERS=\"ntfy\"，并填写 NTFY_TOPIC（以及私有服务所需的 NTFY_TOKEN）"
+    say "  2. $BIN_PATH --test-notify     # 发送一条测试通知"
 }
 
 do_install() {
@@ -273,6 +303,7 @@ do_install() {
     fi
 
     install_program
+    install_notifiers
     install_config
     prepare_log
     install_cron

@@ -26,3 +26,25 @@ DISK_MOUNTS="/"
 # ---------- 采样 ----------
 # CPU 使用率两次采样之间的间隔（秒）
 CPU_SAMPLE_SECONDS=1
+
+# ---------- 通知 ----------
+# 启用的通知渠道，空格分隔；留空表示不发送通知。当前可用: ntfy
+# 发送测试消息: monitor.sh --test-notify
+NOTIFIERS=""
+
+# 告警持续期间的重复提醒间隔（秒）。0 表示每次运行都提醒（不建议）。
+REMIND_INTERVAL=3600
+
+# 从告警恢复为正常时是否发送恢复通知（1 是，0 否）
+NOTIFY_RECOVERY=1
+
+# ---------- ntfy（NOTIFIERS 包含 ntfy 时生效） ----------
+# 服务地址，可指向自建的 ntfy 服务
+NTFY_URL="https://ntfy.sh"
+# 主题（必填）：仅字母、数字、_ 和 -，建议使用难以猜测的名称
+NTFY_TOPIC=""
+# 访问令牌 tk_...（私有主题或开启鉴权时需要）。本文件权限应为 0600。
+NTFY_TOKEN=""
+# 告警与恢复通知的优先级（1–5）
+NTFY_PRIORITY_ALERT=4
+NTFY_PRIORITY_RECOVERY=3
